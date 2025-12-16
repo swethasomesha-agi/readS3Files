@@ -1,0 +1,18 @@
+logging:
+  file:
+    path: logs_s3/
+appconfig:
+  local: true
+#  emlPath: bmlEmls/
+#  tempPath: bmsTemp/
+  emlPath: C:/Sample_forms/BMS_MAGS_1121769/emls/
+  tempPath: C:/Sample_forms/BMS_MAGS_1121769/temp/
+  outputPath: C:/Sample_forms/BMS_MAGS_1121769/output/
+  excel:
+    file:
+#      path: Email/bms.xlsx
+#      path: C:/Sample_forms/BMS_MAGS_1121769/Remaining.xlsx
+      path: C:/Sample_forms/EditablePDFIssue/BMS_impactListEditablePdf15.xlsx
+  s3:
+    bucket: lsmv-prod-bms
+    region: eu-west-1

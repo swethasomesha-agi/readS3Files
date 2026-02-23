@@ -20,7 +20,12 @@ public class ReadS3FilesApplication {
         try {
 //            writePageNumbers.emailAttachmentDetail();
 //            writePageNumbers.editablePdfAttachmentDetail();
-            writePageNumbers.prepareFlattenedFiles();
+//            writePageNumbers.prepareFlattenedFiles();
+            writePageNumbers.identifyMultilineInWordDoc();
+
+//            writePageNumbers.processWordAttachmentTest("C:\\Sample_forms\\BMS\\AE-ORP-1572279 ORP0001101.docx",null);
+//            writePageNumbers.processWordAttachmentTest("C:\\Sample_forms\\normal.docx", null);
+
 //            writePageNumbers.updateResultSheet();
             System.exit(0);
 

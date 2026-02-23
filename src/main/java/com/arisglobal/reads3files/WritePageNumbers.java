@@ -8,28 +8,31 @@ import com.amazonaws.services.s3.model.S3ObjectInputStream;
 import com.arisglobal.reads3files.components.AppConfigs;
 import com.arisglobal.reads3files.service.AsposeLicenseHandler;
 import com.arisglobal.reads3files.service.S3Configurations;
-import com.aspose.cells.BackgroundType;
 import com.aspose.cells.Cell;
 import com.aspose.cells.Cells;
-import com.aspose.cells.Color;
 import com.aspose.cells.Row;
-import com.aspose.cells.Style;
 import com.aspose.cells.Workbook;
 import com.aspose.cells.Worksheet;
-import com.aspose.pdf.AnnotationFlags;
 import com.aspose.pdf.Document;
 import com.aspose.pdf.Field;
 import com.aspose.pdf.FileSpecification;
-import com.aspose.pdf.FormType;
-import com.aspose.pdf.Permissions;
 import com.aspose.pdf.TextBoxField;
-import com.aspose.pdf.facades.DocumentPrivilege;
-import com.aspose.pdf.facades.PdfFileInfo;
-import com.itextpdf.text.pdf.PdfAcroForm;
-import com.itextpdf.text.pdf.PdfDocument;
-import com.itextpdf.text.pdf.PdfReader;
-import com.itextpdf.text.pdf.PdfStamper;
-import com.itextpdf.text.pdf.PdfWriter;
+import com.aspose.words.FormField;
+import com.aspose.words.HeightRule;
+import com.aspose.words.HorizontalAlignment;
+import com.aspose.words.LayoutCollector;
+import com.aspose.words.LayoutEntityType;
+import com.aspose.words.LayoutEnumerator;
+import com.aspose.words.Node;
+import com.aspose.words.NodeCollection;
+import com.aspose.words.NodeType;
+import com.aspose.words.Paragraph;
+import com.aspose.words.Run;
+import com.aspose.words.SaveFormat;
+import com.aspose.words.Section;
+import com.aspose.words.StructuredDocumentTag;
+import com.aspose.words.Table;
+import com.aspose.words.TextWrapping;
 import jakarta.annotation.PostConstruct;
 import jakarta.mail.BodyPart;
 import jakarta.mail.Message;
@@ -53,6 +56,10 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Service;
 
+import java.awt.*;
+import java.awt.font.FontRenderContext;
+import java.awt.geom.AffineTransform;
+import java.awt.geom.Rectangle2D;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -62,6 +69,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -120,6 +130,216 @@ public class WritePageNumbers {
             log.error("caught Exception initialiseAsposeLicenseForPDF", e);
         }
     }
+
+    private boolean isMultilineWordDoc(com.aspose.words.Document document, Detail detail) throws Exception {
+        for (FormField field : (Iterable<FormField>)
+                document.getChildNodes(NodeType.FORM_FIELD, true)) {
+            if (StringUtils.isNotBlank(field.getResult()) && isFormFieldOverflowDetected(document, field, detail)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public boolean isFormFieldOverflowDetected(com.aspose.words.Document doc, StructuredDocumentTag field) throws Exception {
+        doc.updatePageLayout();
+        com.aspose.words.Row row = (com.aspose.words.Row) field.getAncestor(NodeType.ROW);
+        boolean isPara = false;
+        boolean isOverflow = false;
+        if (row != null) {
+            if (row.getRowFormat().getHeightRule() == HeightRule.EXACTLY) {
+                // Approach 1: Check if the form field is inside a paragraph and has an associated layout entity
+                Paragraph para = (Paragraph) field.getAncestor(NodeType.PARAGRAPH);
+                doc.updatePageLayout();
+                LayoutCollector collector = new LayoutCollector(doc);
+                LayoutEnumerator enumerator = new LayoutEnumerator(doc);
+                Object entity = collector.getEntity(para);
+                isPara = entity != null;
+
+                if (isPara) {
+                    enumerator.setCurrent(collector.getEntity(para));
+                    double totalHeight = 0;
+                    if (enumerator.moveFirstChild()) {
+                        do {
+                            if (enumerator.getType() == LayoutEntityType.LINE) {
+                                Rectangle2D rect = enumerator.getRectangle();
+                                totalHeight += rect.getHeight();
+                            }
+                        } while (enumerator.moveNext());
+                    }
+                }
+
+                // Approach 2: Check if the form field's layout rectangle exceeds the row height
+                enumerator.setCurrent(collector.getEntity(field));
+                Rectangle2D rect = enumerator.getRectangle();
+                double renderedHeight = rect.getHeight();
+                double rowHeight = row.getRowFormat().getHeight();
+                if (renderedHeight > rowHeight)
+                    isOverflow = true;
+            }
+        }
+        return isPara && isOverflow;
+    }
+
+    public boolean isFormFieldOverflowDetected(com.aspose.words.Document doc, FormField field, Detail detail) throws Exception {
+        boolean isOverflow = false;
+        try {
+            doc.updatePageLayout();
+            com.aspose.words.Row row = (com.aspose.words.Row) field.getAncestor(NodeType.ROW);
+            if (row != null) {
+                if (row.getRowFormat().getHeightRule() == HeightRule.EXACTLY) {
+                    // Approach 3: Check if text height is more than rectangle height
+                    String text = field.getResult();
+                    Run run = getFirstResultRun(field);
+                    if (null != run) {
+                        String fontName = run.getFont().getName();
+                        int fontSize = (int) run.getFont().getSize();
+                        com.aspose.words.Cell cell = (com.aspose.words.Cell) field.getAncestor(NodeType.CELL);
+
+                        double maxWidth = cell.getCellFormat().getWidth()
+                                - cell.getCellFormat().getLeftPadding()
+                                - cell.getCellFormat().getRightPadding();
+
+                        int lines = calculateWrappedLines(text, fontName, fontSize, maxWidth);
+
+                        double textHeight = calculateTextHeight(lines, fontSize);
+
+                        double allowedHeight = row.getRowFormat().getHeight();
+
+                        if (textHeight > allowedHeight) {
+                            detail.comments.append("Field: " + field.getName() + " , Data: " + field.getResult() + " , Text Height: " + textHeight + " , Allowed Height: " + allowedHeight);
+                            isOverflow = true;
+                            log.info(detail.comments.toString());
+                            return isOverflow;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return isOverflow;
+    }
+
+    public boolean isFormFieldOverflowDetectedOtherApproach(com.aspose.words.Document doc, FormField field) throws Exception {
+        doc.updatePageLayout();
+        com.aspose.words.Row row = (com.aspose.words.Row) field.getAncestor(NodeType.ROW);
+        boolean isPara = false;
+        boolean isOverflow = false;
+        if (row != null) {
+            if (row.getRowFormat().getHeightRule() == HeightRule.EXACTLY) {
+                // Approach 1: Check if the form field is inside a paragraph and has an associated layout entity
+                Paragraph para = (Paragraph) field.getAncestor(NodeType.PARAGRAPH);
+                doc.updatePageLayout();
+                LayoutCollector collector = new LayoutCollector(doc);
+                LayoutEnumerator enumerator = new LayoutEnumerator(doc);
+                Object entity = collector.getEntity(para);
+                isPara = entity != null;
+
+                if (isPara) {
+                    enumerator.setCurrent(collector.getEntity(para));
+                    double totalHeight = 0;
+                    if (enumerator.moveFirstChild()) {
+                        do {
+                            if (enumerator.getType() == LayoutEntityType.LINE) {
+                                Rectangle2D rect = enumerator.getRectangle();
+                                totalHeight += rect.getHeight();
+                            }
+                        } while (enumerator.moveNext());
+                    }
+                }
+
+                // Approach 2: Check if the form field's layout rectangle exceeds the row height
+                enumerator.setCurrent(collector.getEntity(field));
+                Rectangle2D rect = enumerator.getRectangle();
+                double renderedHeight = rect.getHeight();
+                double rowHeight = row.getRowFormat().getHeight();
+                if (renderedHeight > rowHeight)
+                    isOverflow = true;
+            }
+
+        }
+        return isPara && isOverflow;
+    }
+
+    private double calculateTextWidth(String text, String fontName, int fontSize) {
+
+        Font font = new Font(fontName, Font.PLAIN, fontSize);
+
+        FontRenderContext frc = new FontRenderContext(new AffineTransform(), true, true);
+
+        return font.getStringBounds(text, frc).getWidth();
+    }
+
+    private int calculateWrappedLines(String text,
+                                      String fontName,
+                                      int fontSize,
+                                      double maxWidth) {
+
+        String[] words = text.split(" ");
+        int lines = 1;
+        StringBuilder currentLine = new StringBuilder();
+
+        for (String word : words) {
+
+            String testLine = currentLine.length() == 0
+                    ? word
+                    : currentLine + " " + word;
+
+            double width = calculateTextWidth(testLine, fontName, fontSize);
+
+            if (width > maxWidth) {
+                lines++;
+                currentLine = new StringBuilder(word);
+            } else {
+                currentLine = new StringBuilder(testLine);
+            }
+        }
+
+        return lines;
+    }
+
+    private double calculateTextHeight(int lineCount, int fontSize) {
+
+        double lineHeight = fontSize * 1.2; // Word approx line spacing
+
+        return lineCount * lineHeight;
+    }
+
+
+    private double getRenderedParagraphHeight(com.aspose.words.Document doc, Paragraph para) throws Exception {
+
+        doc.updatePageLayout();
+        LayoutCollector collector = new LayoutCollector(doc);
+        LayoutEnumerator enumerator = new LayoutEnumerator(doc);
+
+        Object entity = collector.getEntity(para);
+        if (entity == null) return 0;
+
+        enumerator.setCurrent(entity);
+
+        double totalHeight = 0;
+
+        com.aspose.words.Row row = (com.aspose.words.Row) para.getAncestor(NodeType.ROW);
+
+        Object rowEntity = collector.getEntity(row);
+
+        if (rowEntity != null) {
+            enumerator.setCurrent(rowEntity);
+            double renderedRowHeight = enumerator.getRectangle().getHeight();
+
+            double fixedHeight = row.getRowFormat().getHeight();
+
+            if (row.getRowFormat().getHeightRule() == HeightRule.EXACTLY
+                    && renderedRowHeight > fixedHeight) {
+
+                System.out.println("Content is trimmed in this row.");
+            }
+        }
+
+        return totalHeight;
+    }
+
 
     private boolean isFormField(com.aspose.pdf.Document document, Detail detail) {
         try {
@@ -219,7 +439,7 @@ public class WritePageNumbers {
                                 }
                                 if (null != emlData) {
                                     detail.attachmentsFromDb = null != dbAttachmentsCell ? dbAttachmentsCell.getStringValue() : "";
-                                    detail = processPart(emlData, detail);
+                                    detail = processPart(emlData, detail, "pdf");
                                     processDetail(detail);
                                     writeDetailToExcel(detail, row, "COMPLETED");
                                 } else {
@@ -299,7 +519,7 @@ public class WritePageNumbers {
                                 }
                                 if (null != emlData) {
                                     detail.attachmentsFromDb = null != dbAttachmentsCell ? dbAttachmentsCell.getStringValue() : "";
-                                    detail = processPart(emlData, detail);
+                                    detail = processPart(emlData, detail, "pdf");
                                     writeEditablePdfDetailToExcel(detail, row, "COMPLETED");
                                 } else {
                                     writeEditablePdfDetailToExcel(detail, row, "File not found in S3");
@@ -331,6 +551,12 @@ public class WritePageNumbers {
             if (s3Client != null) {
                 s3Client.shutdown();
             }
+        }
+    }
+
+    private void writeDocResult(Workbook workbook, Row row, Detail detail) {
+        if (detail.hasMultiline) {
+
         }
     }
 
@@ -533,7 +759,7 @@ public class WritePageNumbers {
         detail.allAttachmentCount = (int) Arrays.stream(detail.allAttachments.split("\\s*,\\s*")).map(String::trim).count();
     }
 
-    private Detail processPart(byte[] emlData, Detail detail) {
+    private Detail processPart(byte[] emlData, Detail detail, String fileTypeToCheck) {
         Message message = null;
         try {
             message = new MimeMessage(null, new ByteArrayInputStream(emlData));
@@ -550,10 +776,12 @@ public class WritePageNumbers {
 //                            detail.isZip = true;
                             processZip(fileName, IOUtils.toByteArray(bodyPart.getInputStream()), detail);
                         } else if ("eml".equalsIgnoreCase(fileType) || "msg".equalsIgnoreCase(fileType) || "rpmsg".equalsIgnoreCase(fileType)) {
-                            processPart(IOUtils.toByteArray(bodyPart.getInputStream()), detail);
+                            processPart(IOUtils.toByteArray(bodyPart.getInputStream()), detail, fileTypeToCheck);
                         }
-                        if ("pdf".equalsIgnoreCase(fileType)) {
+                        if ("pdf".equalsIgnoreCase(fileType) && "pdf".equalsIgnoreCase(fileTypeToCheck)) {
                             processPdfAttachment(fileName, IOUtils.toByteArray(bodyPart.getInputStream()), detail);
+                        } else if (("docx".equalsIgnoreCase(fileType) || "doc".equalsIgnoreCase(fileType)) && "word".equalsIgnoreCase(fileTypeToCheck)) {
+                            processWordAttachment(fileName, IOUtils.toByteArray(bodyPart.getInputStream()), detail);
                         }
                         detail.allAttachmentsBuilder.append(",");
                         detail.allAttachmentsBuilder.append(fileName);
@@ -574,6 +802,68 @@ public class WritePageNumbers {
             detail.fileName = fileName;
         }
     }
+
+    public void processWordAttachment(String fileName, byte[] contents, Detail detail) throws IOException {
+        Path tempFile = null;
+        try {
+            tempFile = Paths.get(appConfigs.getTempPath(), fileName);
+            Files.createFile(tempFile);
+            Files.write(tempFile, contents);
+            com.aspose.words.Document document = new com.aspose.words.Document(tempFile.toAbsolutePath().toString());
+            if (null == detail)
+                detail = new Detail();
+            if (isMultilineWordDoc(document, detail)) {
+                detail.hasMultiline = true;
+                detail.fileName = fileName;
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            Files.deleteIfExists(tempFile);
+        }
+    }
+
+    public void processWordAttachmentTest(String fileName, Detail detail) throws IOException {
+        try {
+            com.aspose.words.Document document = new com.aspose.words.Document(fileName);
+            if (null == detail)
+                detail = new Detail();
+            if (isMultilineWordDoc(document, detail)) {
+                detail.hasMultiline = true;
+                detail.fileName = fileName;
+            }
+            System.out.println("Processed Word document: " + fileName + ", hasMultiline: " + detail.hasMultiline + " [" + detail.comments.toString() + "]");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private Run getFirstResultRun(FormField ff) {
+
+        Node current = ff.getNextSibling();
+
+        // Move until separator
+        while (current != null && current.getNodeType() != NodeType.FIELD_SEPARATOR) {
+            current = current.getNextSibling();
+        }
+
+        if (current == null) return null;
+
+        // Move to first result run
+        current = current.getNextSibling();
+
+        while (current != null && current.getNodeType() != NodeType.FIELD_END) {
+
+            if (current.getNodeType() == NodeType.RUN) {
+                return (Run) current;
+            }
+
+            current = current.getNextSibling();
+        }
+
+        return null;
+    }
+
 
     class Detail {
         boolean isZip;
@@ -621,7 +911,11 @@ public class WritePageNumbers {
                             processFile(IOUtils.toByteArray(bodyPart.getInputStream()), detail, fileName, receiptNumber);
                         }
                         if (pdfFileName.equals(fileName)) {
-                            flattenAndSaveFile(fileName, IOUtils.toByteArray(bodyPart.getInputStream()), receiptNumber);
+                            if (!"pdf".equalsIgnoreCase(fileType)) {
+                                convertAndSaveFile(fileName, IOUtils.toByteArray(bodyPart.getInputStream()), receiptNumber);
+                            } else {
+                                flattenAndSaveFile(fileName, IOUtils.toByteArray(bodyPart.getInputStream()), receiptNumber);
+                            }
                         }
                         detail.allAttachmentsBuilder.append(",");
                         detail.allAttachmentsBuilder.append(fileName);
@@ -632,6 +926,83 @@ public class WritePageNumbers {
             e.printStackTrace();
         }
         return detail;
+    }
+
+
+    private byte[] convertToPdf(byte[] contents) {
+        try (ByteArrayInputStream bi = new ByteArrayInputStream(contents);
+             ByteArrayOutputStream os = new ByteArrayOutputStream()) {
+            com.aspose.words.Document doc = new com.aspose.words.Document(bi);
+            com.aspose.words.PdfSaveOptions saveOptions = new com.aspose.words.PdfSaveOptions();
+            saveOptions.setSaveFormat(SaveFormat.PDF);
+            saveOptions.setMemoryOptimization(true);
+            wordDocumentExtraction(doc);
+            doc.save(os, saveOptions);
+            return os.toByteArray();
+        } catch (Exception e) {
+            System.out.println(e);
+        }
+        return null;
+    }
+
+    private static void wordDocumentExtraction(com.aspose.words.Document doc) throws Exception {
+        try {
+            if (null != doc && null != doc.getSections()) {
+                for (Section section : doc.getSections()) {
+                    if (null != section.getBody() && null != section.getBody().getTables() && section.getBody().getTables().getCount() > 0) {
+                        for (Table table : section.getBody().getTables()) {
+                            if (table.getTextWrapping() == TextWrapping.AROUND
+                                    && table.getAllowOverlap()
+                                    && table.getRelativeHorizontalAlignment() != HorizontalAlignment.RIGHT) {
+                                table.setTextWrapping(TextWrapping.NONE);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("getting Exception from @wordDocumentExtraction ::{}" + e);
+        }
+    }
+
+    private void convertAndSaveFile(String fileName, byte[] contents, String receiptNumber) {
+        FileOutputStream fos = null;
+        try {
+            // Create receipt directory if not exists
+            File receiptDir = new File(appConfigs.getOutputPath(), receiptNumber);
+            if (!receiptDir.exists()) {
+                receiptDir.mkdirs();
+            }
+
+            // 1. Save original PDF
+            File originalFile = new File(receiptDir, "ORIGINAL_" + fileName);
+            fos = new FileOutputStream(originalFile);
+            fos.write(contents);
+            fos.flush();
+            fos.close();
+
+            // 2. Load PDF from bytes and flatten
+            byte[] convertedPdfContent = convertToPdf(contents);
+
+            // 3. Save converted PDF
+            if (convertedPdfContent != null) {
+                File convertedFile = new File(receiptDir, "CONVERTED_" + FilenameUtils.getBaseName(fileName) + ".pdf");
+                FileUtils.writeByteArrayToFile(convertedFile, convertedPdfContent);
+                log.info("Saved original and Converted PDF for receiptNumber={}", receiptNumber);
+            } else {
+                log.info("Fail to Converted PDF for receiptNumber={}", receiptNumber);
+            }
+
+        } catch (Exception e) {
+            log.error("Error saving PDFs for receipt number: {}", receiptNumber, e);
+        } finally {
+            if (fos != null) {
+                try {
+                    fos.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
     }
 
     private void flattenAndSaveFile(String fileName, byte[] contents, String receiptNumber) {
@@ -1118,15 +1489,15 @@ public class WritePageNumbers {
             S3Object s3object = s3Client.getObject(appConfigs.getS3BucketName(), key);
             S3ObjectInputStream inputStream = s3object.getObjectContent();
             byte[] content = IOUtils.toByteArray(inputStream);
-            saveEmlToLocal(key, content);
+//            saveEmlToLocal(key, content);
             return content;
         } catch (Exception e) {
             log.error("caught Exception readFileFromS3", e);
-            System.exit(0);
             if (workbook != null) {
                 workbook.save(appConfigs.getExcelPath());
                 log.info("Excel updated.....      ");
             }
+            System.exit(0);
         }
         return null;
     }
@@ -1150,11 +1521,18 @@ public class WritePageNumbers {
             return new FileInputStream(filePath).readAllBytes();
         } catch (Exception e) {
 //            log.error("caught Exception readFileFromLocal", e);
+//            if (workbook != null) {
+//                workbook.save(appConfigs.getExcelPath());
+//                log.info("Excel updated.....      ");
+//            }
+//            System.exit(0);
             return readFileFromS3(workbook, s3Configurations.s3Client(), key);
         }
+//        return null;
     }
 
-    private boolean determineFileTypeAndSaveFile(com.aspose.pdf.Document pdfDocument, String rctNo, String docId) throws Exception {
+    private boolean determineFileTypeAndSaveFile(com.aspose.pdf.Document pdfDocument, String rctNo, String docId) throws
+            Exception {
         boolean anyEmbeddedFileCorrupted = false;
         try {
             String tmpPath = "C:\\BMS_MAGS-1039546\\Output";
@@ -1389,10 +1767,10 @@ public class WritePageNumbers {
 
                     // Loop through each cell in the row
                     // Get the cell
-                    Cell statusCell = row.get(0);
-                    Cell s3PathCell = row.getCellOrNull(7);
-                    Cell fileNameCell = row.get(6);
-                    Cell rcptNumberCell = row.get(5);
+                    Cell statusCell = row.get(8);
+                    Cell s3PathCell = row.getCellOrNull(11);
+                    Cell fileNameCell = row.get(7);
+                    Cell rcptNumberCell = row.get(4);
 
                     if (!"COMPLETED".equalsIgnoreCase(statusCell.getStringValue()) && s3PathCell != null && fileNameCell != null) {
                         String s3Key = s3PathCell.getStringValue();
@@ -1407,7 +1785,7 @@ public class WritePageNumbers {
                             if (null != emlData) {
                                 String fileName = null != fileNameCell ? fileNameCell.getStringValue() : "";
                                 String receiptNumber = null != rcptNumberCell ? rcptNumberCell.getStringValue() : "";
-                                detail = processFile(emlData, detail, fileName, receiptNumber);
+                                processFile(emlData, detail, fileName, receiptNumber);
                                 statusCell.setValue("COMPLETED");
                                 log.info("row completed.....      " + i);
                                 statusCell.setValue("COMPLETED");
@@ -1431,6 +1809,102 @@ public class WritePageNumbers {
                 log.info("Excel updated.....      ");
             }
         }
+    }
+
+    public void identifyMultilineInWordDoc() throws Exception {
+        AmazonS3 s3Client = null;
+        Workbook workbook = null;
+        try {
+            s3Client = AmazonS3ClientBuilder.standard()
+                    .withRegion(appConfigs.getS3RegionName())
+                    .withCredentials(DefaultAWSCredentialsProviderChain.getInstance())
+                    .build();
+            // Instantiate a new Workbook object
+            workbook = new Workbook(appConfigs.getExcelPath());
+
+            for (int sheetNo = 0; sheetNo <= 0; sheetNo++) {
+//            for (int sheetNo = 0; sheetNo <= 0; sheetNo++) {
+                Worksheet worksheet = workbook.getWorksheets().get(sheetNo);
+                // Get the cells from the sheet
+                Cells cells = worksheet.getCells();
+
+                // Get the maximum data row
+                int maxDataRow = cells.getMaxDataRow();
+
+
+                // Loop through each row
+                for (int i = 1; i <= maxDataRow; i++) {
+                    // Get the row
+                    Row row = cells.getRow(i);
+
+                    // Loop through each cell in the row
+                    // Get the cell
+                    Cell emlPathCell = row.getCellOrNull(11);
+                    Cell dbAttachmentsCell = row.get(12);
+                    Cell statusCell = row.get(8);
+
+                    if (emlPathCell != null) {
+                        String s3Key = emlPathCell.getStringValue();
+                        if (!"COMPLETED".equalsIgnoreCase(statusCell.getStringValue()) && StringUtils.isNotBlank(s3Key)) {
+                            Detail detail = new Detail();
+                            try {
+                                byte[] emlData;
+                                if (appConfigs.isLocal()) {
+                                    emlData = readFileFromLocal(s3Key, workbook);
+                                } else {
+                                    emlData = readFileFromS3(workbook, s3Configurations.s3Client(), s3Key);
+                                }
+                                if (null != emlData) {
+                                    detail.attachmentsFromDb = null != dbAttachmentsCell ? dbAttachmentsCell.getStringValue() : "";
+                                    detail = processPart(emlData, detail, "word");
+                                    writeDocDetailToExcel(detail, row, "COMPLETED");
+                                } else {
+                                    writeDocDetailToExcel(detail, row, "File not found in S3");
+                                    log.info("row failed.....      " + i + " File not found in S3");
+                                }
+                            } catch (Exception e) {
+                                detail.comments.append(" [" + e.getMessage() + "] ");
+                                writeDocDetailToExcel(detail, row, "FAILED");
+                            } finally {
+                                writeDocResult(workbook, row, detail);
+                            }
+                            // Save the workbook
+                            log.info("row finished.....      " + i);
+                            if (i % 100 == 0)
+                                workbook.save(appConfigs.getExcelPath());
+//                            if (i % 40000 == 0)
+//                                return;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.error("caught Exception readExcelFileRowByRow", e);
+        } finally {
+            if (workbook != null) {
+                workbook.save(appConfigs.getExcelPath());
+                log.info("Excel updated.....      ");
+            }
+            if (s3Client != null) {
+                s3Client.shutdown();
+            }
+        }
+    }
+
+
+    private void writeDocDetailToExcel(Detail detail, Row row, String status) {
+        Cell hasMultiline = row.get(6);
+        Cell docFilename = row.get(7);
+        Cell statusCell = row.get(8);
+        Cell commentsCell = row.get(9);
+        Cell allAttachmentNamesCell = row.get(10);
+
+        docFilename.setValue(detail.fileName);
+        commentsCell.setValue(detail.comments.toString());
+        allAttachmentNamesCell.setValue(detail.allAttachmentsBuilder.toString());
+        statusCell.setValue(status);
+        hasMultiline.setValue(detail.hasMultiline);
+
     }
 
 }

@@ -1,11 +1,14 @@
 package com.arisglobal.reads3files;
 
+import org.apache.commons.io.FileUtils;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration;
 import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration;
 import org.springframework.context.ApplicationContext;
+
+import java.io.File;
 
 @SpringBootApplication(exclude = {DataSourceAutoConfiguration.class, DataSourceTransactionManagerAutoConfiguration.class, HibernateJpaAutoConfiguration.class})
 public class ReadS3FilesApplication {
@@ -21,14 +24,14 @@ public class ReadS3FilesApplication {
 //            writePageNumbers.emailAttachmentDetail();
 //            writePageNumbers.editablePdfAttachmentDetail();
 //            writePageNumbers.prepareFlattenedFiles();
-            writePageNumbers.identifyMultilineInWordDoc();
+//            writePageNumbers.identifyMultilineInWordDoc();
 
 //            writePageNumbers.processWordAttachmentTest("C:\\Sample_forms\\BMS\\AE-ORP-1572279 ORP0001101.docx",null);
-//            writePageNumbers.processWordAttachmentTest("C:\\Sample_forms\\normal.docx", null);
+//            writePageNumbers.processWordAttachmentTest("C:\\Sample_forms\\BMS\\BMS_SAE.docx", null);
 
 //            writePageNumbers.updateResultSheet();
+            writePageNumbers.convertAndSaveWordFile("bmsWord.docx", FileUtils.readFileToByteArray(new File("C:\\Sample_forms\\BMS\\BMS_SAE_original.docx")), "POC");
             System.exit(0);
-
 //            writePageNumbers.readExcelFileRowByRow();
 //            writePageNumbers.readExcelFileRowByRowForOriginal();
 //            writePageNumbers.readExcelFileRowByRowCopyImpacted();

@@ -16,7 +16,9 @@ import com.aspose.cells.Worksheet;
 import com.aspose.pdf.Document;
 import com.aspose.pdf.Field;
 import com.aspose.pdf.FileSpecification;
+import com.aspose.pdf.FontRepository;
 import com.aspose.pdf.TextBoxField;
+import com.aspose.pdf.TextState;
 import com.aspose.words.FormField;
 import com.aspose.words.HeightRule;
 import com.aspose.words.HorizontalAlignment;
@@ -134,10 +136,18 @@ public class WritePageNumbers {
     private boolean isMultilineWordDoc(com.aspose.words.Document document, Detail detail) throws Exception {
         for (FormField field : (Iterable<FormField>)
                 document.getChildNodes(NodeType.FORM_FIELD, true)) {
-            if (StringUtils.isNotBlank(field.getResult()) && isFormFieldOverflowDetected(document, field, detail)) {
-                return true;
-            }
+//            if (StringUtils.isNotBlank(field.getResult()) && isFormFieldOverflowDetected(document, field, detail)) {
+//                return true;
+//            }
+            adjustFormFieldOverflow(document, field, detail);
         }
+        document.updatePageLayout();
+        com.aspose.words.PdfSaveOptions saveOptions = new com.aspose.words.PdfSaveOptions();
+        saveOptions.setSaveFormat(SaveFormat.PDF);
+        saveOptions.setMemoryOptimization(true);
+//            saveOptions.setPreserveFormFields(true);
+        wordDocumentExtraction(document);
+        document.save("C:\\Sample_forms\\BMS\\BMS_SAE.pdf", saveOptions);
         return false;
     }
 
@@ -219,6 +229,61 @@ public class WritePageNumbers {
             e.printStackTrace();
         }
         return isOverflow;
+    }
+
+    public void adjustFormFieldOverflow(com.aspose.words.Document doc, FormField field, Detail detail) throws Exception {
+        try {
+            doc.updatePageLayout();
+            com.aspose.words.Row row = (com.aspose.words.Row) field.getAncestor(NodeType.ROW);
+            if (row != null) {
+                if (row.getRowFormat().getHeightRule() == HeightRule.EXACTLY) {
+                    // Approach 3: Check if text height is more than rectangle height
+                    String text = field.getResult();
+                    Run run = getFirstResultRun(field);
+                    if (null != run) {
+                        String fontName = run.getFont().getName();
+                        int fontSize = (int) run.getFont().getSize();
+                        com.aspose.words.Cell cell = (com.aspose.words.Cell) field.getAncestor(NodeType.CELL);
+
+                        double maxWidth = cell.getCellFormat().getWidth()
+                                - cell.getCellFormat().getLeftPadding()
+                                - cell.getCellFormat().getRightPadding();
+
+                        int lines = calculateWrappedLines(text, fontName, fontSize, maxWidth);
+
+                        double textHeight = calculateTextHeight(lines, fontSize);
+
+                        double allowedHeight = row.getRowFormat().getHeight();
+
+                        if (textHeight > allowedHeight) {
+                            detail.comments.append("Field: " + field.getName() + " , Data: " + field.getResult() + " , Text Height: " + textHeight + " , Allowed Height: " + allowedHeight);
+                            log.info(detail.comments.toString());
+                            System.out.println(detail.comments.toString());
+                            expandRowHeight(row, textHeight);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        doc.updatePageLayout();
+    }
+
+    private void expandRowHeight(com.aspose.words.Row row, double textHeight) {
+        // Add padding buffer (e.g., 2pt top + 2pt bottom)
+        double buffer = 4.0;
+        double newHeight = textHeight + buffer;
+
+        // Option A: AT_LEAST — row can grow further if needed (recommended)
+        row.getRowFormat().setHeightRule(HeightRule.AT_LEAST);
+        row.getRowFormat().setHeight(newHeight);
+
+        // Option B: EXACTLY — locks to exact calculated height (use if strict layout needed)
+        // row.getRowFormat().setHeightRule(HeightRule.EXACTLY);
+        // row.getRowFormat().setHeight(newHeight);
+
+        log.info("Row height expanded to: " + newHeight + " pts");
     }
 
     public boolean isFormFieldOverflowDetectedOtherApproach(com.aspose.words.Document doc, FormField field) throws Exception {
@@ -936,9 +1001,30 @@ public class WritePageNumbers {
             com.aspose.words.PdfSaveOptions saveOptions = new com.aspose.words.PdfSaveOptions();
             saveOptions.setSaveFormat(SaveFormat.PDF);
             saveOptions.setMemoryOptimization(true);
+            saveOptions.setPreserveFormFields(true);
             wordDocumentExtraction(doc);
             doc.save(os, saveOptions);
+
             return os.toByteArray();
+            // To set to multiline
+//            Document pdfDoc = new Document(os.toByteArray());
+//            try (ByteArrayOutputStream osNew = new ByteArrayOutputStream()) {
+//                for (Field field : pdfDoc.getForm().getFields()) {
+//                    if (field instanceof TextBoxField) {
+//                        TextBoxField textBox = (TextBoxField) field;
+////                        textBox.setMultiline(true);
+//                        // Increase height
+//                        com.aspose.pdf.Rectangle rect = textBox.getRect();
+//                        double increase = 50;
+//                        com.aspose.pdf.Rectangle newRect = new com.aspose.pdf.Rectangle(rect.getLLX() + increase, rect.getLLY(), rect.getURX(), rect.getURY());
+//                        textBox.setRect(newRect);
+//                    }
+//                }
+//                pdfDoc.save(osNew);
+//                return osNew.toByteArray();
+//            } catch (Exception e) {
+//                System.out.println(e);
+//            }
         } catch (Exception e) {
             System.out.println(e);
         }
@@ -1030,6 +1116,46 @@ public class WritePageNumbers {
             document.save(flattenedFile.getAbsolutePath());
 
             log.info("Saved original and flattened PDF for receiptNumber={}", receiptNumber);
+
+        } catch (Exception e) {
+            log.error("Error saving PDFs for receipt number: {}", receiptNumber, e);
+        } finally {
+            if (fos != null) {
+                try {
+                    fos.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    void convertAndSaveWordFile(String fileName, byte[] contents, String receiptNumber) {
+        FileOutputStream fos = null;
+        try {
+            // Create receipt directory if not exists
+            File receiptDir = new File(appConfigs.getOutputPath(), receiptNumber);
+            if (!receiptDir.exists()) {
+                receiptDir.mkdirs();
+            }
+
+            // 1. Save original PDF
+            File originalFile = new File(receiptDir, "ORIGINAL_" + fileName);
+            fos = new FileOutputStream(originalFile);
+            fos.write(contents);
+            fos.flush();
+            fos.close();
+
+            // 2. Load PDF from bytes and flatten
+            byte[] convertedPdfContent = convertToPdf(contents);
+
+            // 3. Save converted PDF
+            if (convertedPdfContent != null) {
+                File convertedFile = new File(receiptDir, "CONVERTED_" + FilenameUtils.getBaseName(fileName) + ".pdf");
+                FileUtils.writeByteArrayToFile(convertedFile, convertedPdfContent);
+                log.info("Saved original and Converted PDF for receiptNumber={}", receiptNumber);
+            } else {
+                log.info("Fail to Converted PDF for receiptNumber={}", receiptNumber);
+            }
 
         } catch (Exception e) {
             log.error("Error saving PDFs for receipt number: {}", receiptNumber, e);
